@@ -1,7 +1,7 @@
 [Desktop Entry]
 Type=Application
 Name=Weather Widget
-Exec=/home/YOURUSER/weather-widget/weather-widget
+Exec=/home/YOURUSER/Weather-widget-in-C-for-debian-ubuntu/weather-widget
 Hidden=false
 NoDisplay=false
 X-GNOME-Autostart-enabled=true
