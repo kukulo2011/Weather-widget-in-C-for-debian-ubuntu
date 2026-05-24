@@ -33,8 +33,6 @@ Running:
 
 Autostart:
 
-Put the following line in your autostart script on your OS:
-
 Create a desktop file in:
 
 ~/.config/autostart/weather-widget.desktop
