@@ -11,15 +11,9 @@ Clone the repository: git clone https://github.com/kukulo2011/Weather-widget-in-
 
 First, edit your longitude and lattitude for your accurate location on line 11-13 in the main.c.
 
-Installation prerequisities:
+This is for MX Linux 19:
 
-sudo apt install -y \
-  build-essential \
-  pkg-config \
-  libgtk-3-dev \
-  libappindicator3-dev \
-  libcurl4-openssl-dev \
-  libjson-c-dev
+Installation prerequisities:
 
 Icon prerequisities / courtesy of https://github.com/atareao/my-weather-indicator/ :
 
@@ -30,16 +24,17 @@ sudo apt install my-weather-indicator
 
 Compiling:
 
-gcc main.c -o weather $(pkg-config --cflags --libs gtk+-3.0 appindicator3-0.1 json-c libcurl)
+make clean-deps
+make
 
 Running:
 
-./weather&
+./weather-widget&
 
 Autostart:
 
 Put the following line in your autostart script on your OS:
 
-/your_home_directory/Weather-widget-in-C-for-debian-ubuntu/weather
+Create a desktop file in:
 
-
+~/.config/autostart/weather-widget.desktop
