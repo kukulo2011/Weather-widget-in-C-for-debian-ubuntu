@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Weather Widget
+Exec=/home/YOURUSER/weather-widget/weather-widget
+Hidden=false
+NoDisplay=false
+X-GNOME-Autostart-enabled=true
+Terminal=false
