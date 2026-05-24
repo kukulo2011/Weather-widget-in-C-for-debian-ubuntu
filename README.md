@@ -1,4 +1,4 @@
-# Weather-widget-in-C-for-debian-ubuntu
+# Weather widget in C for debian ubuntu
 
 
 Do you remember Volkov commander? An assembly language clone of Norton Commander with only just 65kB in size?
