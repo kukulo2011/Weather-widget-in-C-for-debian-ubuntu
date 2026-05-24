@@ -39,6 +39,6 @@ Autostart:
 
 Put the following line in your autostart script on your OS:
 
-/Weather-widget-in-C-for-debian-ubuntu/weather
+/your_home_directory/Weather-widget-in-C-for-debian-ubuntu/weather
 
 
