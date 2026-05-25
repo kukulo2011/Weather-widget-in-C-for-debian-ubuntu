@@ -9,7 +9,7 @@ Courtesy of ChatGPT+Claude+Qwen and 3 hours of my spare time.
 Clone the repository: git clone https://github.com/kukulo2011/Weather-widget-in-C-for-debian-ubuntu/
                       cd Weather-widget-in-C-for-debian-ubuntu
 
-First, edit your longitude and lattitude for your accurate location on line 11-13 in the main.c.
+Location can be edited in the settings tray menu. Move of the widget ALT + mouse left drag.
 
 Installation prerequisities:
 
