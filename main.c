@@ -1498,7 +1498,7 @@ int main(
 
     gtk_window_set_keep_above(
         GTK_WINDOW(window),
-        TRUE
+        FALSE
     );
 
     gtk_widget_set_app_paintable(
