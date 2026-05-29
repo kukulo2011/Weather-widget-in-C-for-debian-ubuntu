@@ -1,6 +1,6 @@
 # Weather widget in C for debian ubuntu
 
-![Screenshot](widegt.png)
+![Screenshot](Screenshot.png)
 
 Do you remember Volkov commander? An assembly language clone of Norton Commander with only just 65kB in size?
 I realized that python with my weather indicator is eating up my computing resources on slower machines and decided to write a minimalistic indicator showing only what I need. The compiled size is 45kB and resources consumed minimal. 
