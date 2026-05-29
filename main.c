@@ -1,3 +1,4 @@
+/* gcc main.c -o weather $(pkg-config --cflags --libs gtk+-3.0 appindicator3-0.1 json-c libcurl) */
 #include <gtk/gtk.h>
 #include <gdk/gdk.h>
 #include <libappindicator/app-indicator.h>
@@ -34,6 +35,11 @@ static GtkWidget *window;
 static GtkWidget *clock_label;
 static GtkWidget *weather_icon_image;
 static GtkWidget *current_label;
+static GtkWidget *h1;
+static GtkWidget *h2;
+static GtkWidget *m1;
+static GtkWidget *m2;
+static GtkWidget *colon;
 
 static GtkWidget *icon_row;
 static GtkWidget *day_row;
@@ -603,11 +609,6 @@ static void apply_theme(void)
         "button label {"
         "color: black;"
         "}"
-        "#clock_label {"
-        "font-size: 22px;"
-        "font-weight: bold;"
-        "font-family: Monospace;"
-        "}"
         "#current_label {"
         "font-size: 15px;"
         "font-weight: bold;"
@@ -646,6 +647,471 @@ static void apply_theme(void)
     );
 }
 
+/* ---------------- FLIP DIGIT ---------------- */
+
+/*
+ * Each flip digit is a GtkDrawingArea drawn with Cairo.
+ * We store the current char and animate a "flip" via a
+ * fractional progress value (0.0 = still, 1.0 = done).
+ *
+ *  Card dimensions (pixels):
+ *    CARD_W x CARD_H with CARD_R corner radius
+ *
+ *  During flip:
+ *    0.0 .. 0.5  top half folds down  (old digit shrinks)
+ *    0.5 .. 1.0  new digit revealed   (new digit grows up)
+ */
+
+/* Card sized for a 300×300 widget.
+ * Narrower digits: CARD_W 44, font 36pt.
+ */
+#define CARD_W   44
+#define CARD_H   64
+#define CARD_R    7
+#define CARD_FONT 36.0
+#define FLIP_STEPS 14
+#define FLIP_MS    16
+
+typedef struct {
+    GtkWidget *area;
+    char       cur;        /* digit currently shown */
+    char       next;       /* digit we are flipping to */
+    int        step;       /* 0 = idle, 1..FLIP_STEPS = animating */
+    guint      timer_id;
+} FlipDigit;
+
+/* Draw one rounded rectangle card */
+static void card_rounded_rect(cairo_t *cr,
+                               double x, double y,
+                               double w, double h,
+                               double r)
+{
+    cairo_new_sub_path(cr);
+    cairo_arc(cr, x+w-r, y+r,   r, -G_PI/2,  0);
+    cairo_arc(cr, x+w-r, y+h-r, r,  0,       G_PI/2);
+    cairo_arc(cr, x+r,   y+h-r, r,  G_PI/2,  G_PI);
+    cairo_arc(cr, x+r,   y+r,   r,  G_PI,   3*G_PI/2);
+    cairo_close_path(cr);
+}
+
+/* Paint a digit face (top or bottom half) into cr.
+ * half: 0 = top half, 1 = bottom half.
+ * White card, black text — train-station style. */
+static void draw_digit_half(cairo_t *cr,
+                              int w, int h,
+                              char digit,
+                              int half,          /* 0=top 1=bottom */
+                              double brightness) /* 0..1 */
+{
+    /* White card background with a very subtle gradient */
+    cairo_pattern_t *bg;
+    if (half == 0) {
+        bg = cairo_pattern_create_linear(0, 0, 0, h);
+        cairo_pattern_add_color_stop_rgb(bg, 0.0,
+            1.0*brightness, 1.0*brightness, 1.0*brightness);
+        cairo_pattern_add_color_stop_rgb(bg, 1.0,
+            0.90*brightness, 0.90*brightness, 0.90*brightness);
+    } else {
+        bg = cairo_pattern_create_linear(0, 0, 0, h);
+        cairo_pattern_add_color_stop_rgb(bg, 0.0,
+            0.88*brightness, 0.88*brightness, 0.88*brightness);
+        cairo_pattern_add_color_stop_rgb(bg, 1.0,
+            0.96*brightness, 0.96*brightness, 0.96*brightness);
+    }
+
+    /* Clip to top or bottom half */
+    cairo_save(cr);
+    if (half == 0)
+        cairo_rectangle(cr, 0, 0, w, h/2.0);
+    else
+        cairo_rectangle(cr, 0, h/2.0, w, h/2.0);
+    cairo_clip(cr);
+
+    /* Full card shape (clipping shows only the half) */
+    card_rounded_rect(cr, 1, 1, w-2, h-2, CARD_R);
+    cairo_set_source(cr, bg);
+    cairo_fill_preserve(cr);
+
+    /* Card border – dark grey */
+    cairo_set_source_rgba(cr, 0.4, 0.4, 0.4, 1.0);
+    cairo_set_line_width(cr, 1.5);
+    cairo_stroke(cr);
+
+    /* Digit text – black */
+    char txt[2] = { digit, '\0' };
+    cairo_select_font_face(cr,
+        "DejaVu Sans Mono",
+        CAIRO_FONT_SLANT_NORMAL,
+        CAIRO_FONT_WEIGHT_BOLD);
+    cairo_set_font_size(cr, CARD_FONT);
+    cairo_text_extents_t ext;
+    cairo_text_extents(cr, txt, &ext);
+    double tx = (w - ext.width)  / 2.0 - ext.x_bearing;
+    double ty = (h - ext.height) / 2.0 - ext.y_bearing;
+    /* dim text proportionally when animating */
+    double d = brightness < 1.0 ? brightness * 0.15 : 0.0;
+    cairo_set_source_rgba(cr, d, d, d, 1.0);
+    cairo_move_to(cr, tx, ty);
+    cairo_show_text(cr, txt);
+
+    cairo_restore(cr);
+    cairo_pattern_destroy(bg);
+}
+
+/* Draw the centre crease (horizontal line splitting top/bottom) */
+static void draw_crease(cairo_t *cr, int w, int h)
+{
+    cairo_set_source_rgba(cr, 0.55, 0.55, 0.55, 1.0);
+    cairo_set_line_width(cr, 2.0);
+    cairo_move_to(cr, CARD_R, h/2.0);
+    cairo_line_to(cr, w - CARD_R, h/2.0);
+    cairo_stroke(cr);
+}
+
+/* Main draw callback */
+static gboolean flip_digit_draw(GtkWidget *widget,
+                                 cairo_t   *cr,
+                                 gpointer   user_data)
+{
+    FlipDigit *fd = (FlipDigit *)user_data;
+    /* Use actual allocated size so the card fills the widget exactly */
+    GtkAllocation alloc;
+    gtk_widget_get_allocation(widget, &alloc);
+    int w = alloc.width;
+    int h = alloc.height;
+
+    /* ---- static bottom half ---- */
+    char bot_char = (fd->step > 0) ? fd->next : fd->cur;
+    draw_digit_half(cr, w, h, bot_char, 1, 1.0);
+
+    /* ---- static top half ---- */
+    {
+        char top_char = (fd->step > FLIP_STEPS/2) ? fd->next : fd->cur;
+        draw_digit_half(cr, w, h, top_char, 0, 1.0);
+    }
+
+    /* ---- animated flap ---- */
+    if (fd->step > 0) {
+        double progress = (double)fd->step / FLIP_STEPS; /* 0..1 */
+        double scale_y, brightness;
+        char   flap_char;
+
+        if (progress <= 0.5) {
+            double t  = progress / 0.5;          /* 0 → 1 */
+            scale_y   = 1.0 - t * 0.92;          /* never reaches 0 */
+            brightness = 1.0 - t * 0.6;
+            flap_char = fd->cur;
+        } else {
+            double t  = (progress - 0.5) / 0.5;  /* 0 → 1 */
+            scale_y   = t * 0.92 + 0.08;          /* starts from 0.08 */
+            brightness = t * 0.7 + 0.3;
+            flap_char = fd->next;
+        }
+
+        /* scale_y is always in (0.08 .. 0.92) — never 0, never 1 */
+        cairo_save(cr);
+        cairo_rectangle(cr, 0, 0, w, h/2.0);
+        cairo_clip(cr);
+
+        cairo_translate(cr, 0, h/2.0);
+        cairo_scale(cr, 1.0, scale_y);
+        cairo_translate(cr, 0, -h/2.0);
+
+        draw_digit_half(cr, w, h, flap_char, 0, brightness);
+        draw_crease(cr, w, h);
+
+        cairo_restore(cr);
+    }
+
+    /* Always draw the crease on the static card */
+    draw_crease(cr, w, h);
+
+    return FALSE;
+}
+
+/* Timer callback: advance animation frame */
+static gboolean flip_digit_tick(gpointer user_data)
+{
+    FlipDigit *fd = (FlipDigit *)user_data;
+    fd->step++;
+    gtk_widget_queue_draw(fd->area);
+
+    if (fd->step >= FLIP_STEPS) {
+        fd->cur      = fd->next;
+        fd->step     = 0;
+        fd->timer_id = 0;
+        return G_SOURCE_REMOVE;
+    }
+    return G_SOURCE_CONTINUE;
+}
+
+/* Public: set digit (triggers animation if changed) */
+static void flip_digit_set(FlipDigit *fd, char c)
+{
+    if (fd->cur == c && fd->step == 0)
+        return;
+    if (fd->step > 0) {
+        /* Already animating – commit instantly and restart */
+        fd->cur = fd->next;
+        if (fd->timer_id) {
+            g_source_remove(fd->timer_id);
+            fd->timer_id = 0;
+        }
+        fd->step = 0;
+    }
+    if (fd->cur == c)
+        return;
+    fd->next = c;
+    fd->step = 1;
+    fd->timer_id = g_timeout_add(FLIP_MS, flip_digit_tick, fd);
+}
+
+/* Constructor */
+static FlipDigit *flip_digit_new(char initial)
+{
+    FlipDigit *fd = g_new0(FlipDigit, 1);
+    fd->cur  = initial;
+    fd->next = initial;
+    fd->area = gtk_drawing_area_new();
+    gtk_widget_set_size_request(fd->area, CARD_W, CARD_H);
+    g_signal_connect(fd->area, "draw",
+                     G_CALLBACK(flip_digit_draw), fd);
+    return fd;
+}
+
+/* Colon widget – dark dots on transparent background, sized for 300px widget */
+static gboolean colon_draw(GtkWidget *widget, cairo_t *cr,
+                            gpointer data)
+{
+    GtkAllocation alloc;
+    gtk_widget_get_allocation(widget, &alloc);
+    int w = alloc.width;
+    int h = alloc.height;
+    double r = w * 0.18;           /* dot radius */
+    double cx = w / 2.0;
+    cairo_set_source_rgba(cr, 0.15, 0.15, 0.15, 1.0);
+    /* upper dot */
+    cairo_arc(cr, cx, h * 0.34, r, 0, 2*G_PI);
+    cairo_fill(cr);
+    /* lower dot */
+    cairo_arc(cr, cx, h * 0.66, r, 0, 2*G_PI);
+    cairo_fill(cr);
+    return FALSE;
+}
+
+static FlipDigit *fd_h1;
+static FlipDigit *fd_h2;
+static FlipDigit *fd_m1;
+static FlipDigit *fd_m2;
+
+/* ============================================================
+ * FLIP ICON
+ * A white flip-card that holds a weather icon pixbuf.
+ * Same split-card animation as FlipDigit but renders a scaled
+ * pixbuf instead of a character.
+ * ============================================================ */
+
+#define ICON_W   44      /* card width  – matches one digit card  */
+#define ICON_H   58      /* card height – slightly shorter        */
+#define ICON_R    7      /* corner radius                         */
+#define ICON_PAD  4      /* padding around icon inside card       */
+
+typedef struct {
+    GtkWidget  *area;
+    GdkPixbuf  *cur_pb;   /* pixbuf currently shown (or NULL)     */
+    GdkPixbuf  *next_pb;  /* pixbuf we are flipping to            */
+    int         step;     /* 0 = idle, 1..FLIP_STEPS = animating  */
+    guint       timer_id;
+} FlipIcon;
+
+/* Draw the white flip-card background (full card, clipped to half) */
+static void fi_draw_card_half(cairo_t *cr, int w, int h,
+                               GdkPixbuf *pb,
+                               int half,        /* 0=top 1=bottom */
+                               double alpha)    /* 0..1 dim        */
+{
+    /* Card gradient — dark in dark mode, white in light mode */
+    cairo_pattern_t *bg;
+    if (half == 0) {
+        bg = cairo_pattern_create_linear(0, 0, 0, h);
+        cairo_pattern_add_color_stop_rgb(bg, 0.0,
+            dark_mode ? 0.16 : 1.00,
+            dark_mode ? 0.16 : 1.00,
+            dark_mode ? 0.16 : 1.00);
+        cairo_pattern_add_color_stop_rgb(bg, 1.0,
+            dark_mode ? 0.08 : 0.90,
+            dark_mode ? 0.08 : 0.90,
+            dark_mode ? 0.08 : 0.90);
+    } else {
+        bg = cairo_pattern_create_linear(0, 0, 0, h);
+        cairo_pattern_add_color_stop_rgb(bg, 0.0,
+            dark_mode ? 0.06 : 0.88,
+            dark_mode ? 0.06 : 0.88,
+            dark_mode ? 0.06 : 0.88);
+        cairo_pattern_add_color_stop_rgb(bg, 1.0,
+            dark_mode ? 0.13 : 0.96,
+            dark_mode ? 0.13 : 0.96,
+            dark_mode ? 0.13 : 0.96);
+    }
+
+    cairo_save(cr);
+
+    /* Clip to the requested half */
+    if (half == 0)
+        cairo_rectangle(cr, 0, 0, w, h/2.0);
+    else
+        cairo_rectangle(cr, 0, h/2.0, w, h/2.0);
+    cairo_clip(cr);
+
+    /* Card background */
+    card_rounded_rect(cr, 1, 1, w-2, h-2, ICON_R);
+    cairo_set_source(cr, bg);
+    cairo_fill_preserve(cr);
+
+    /* Border */
+    cairo_set_source_rgba(cr, 0.4, 0.4, 0.4, alpha);
+    cairo_set_line_width(cr, 1.5);
+    cairo_stroke(cr);
+
+    /* Pixbuf centred in card */
+    if (pb) {
+        int iw = gdk_pixbuf_get_width(pb);
+        int ih = gdk_pixbuf_get_height(pb);
+        double sx = (double)(w - 2*ICON_PAD) / iw;
+        double sy = (double)(h - 2*ICON_PAD) / ih;
+        double s  = sx < sy ? sx : sy;
+        double dx = (w - iw*s) / 2.0;
+        double dy = (h - ih*s) / 2.0;
+
+        cairo_translate(cr, dx, dy);
+        cairo_scale(cr, s, s);
+        gdk_cairo_set_source_pixbuf(cr, pb, 0, 0);
+        cairo_paint_with_alpha(cr, alpha);
+    }
+
+    cairo_restore(cr);
+    cairo_pattern_destroy(bg);
+}
+
+/* Centre crease for icon card */
+static void fi_draw_crease(cairo_t *cr, int w, int h)
+{
+    cairo_set_source_rgba(cr, 0.55, 0.55, 0.55, 1.0);
+    cairo_set_line_width(cr, 2.0);
+    cairo_move_to(cr, ICON_R, h/2.0);
+    cairo_line_to(cr, w - ICON_R, h/2.0);
+    cairo_stroke(cr);
+}
+
+/* Draw callback */
+static gboolean flip_icon_draw(GtkWidget *widget,
+                                cairo_t   *cr,
+                                gpointer   user_data)
+{
+    FlipIcon *fi = (FlipIcon *)user_data;
+    GtkAllocation alloc;
+    gtk_widget_get_allocation(widget, &alloc);
+    int w = alloc.width;
+    int h = alloc.height;
+
+    /* Static bottom half */
+    GdkPixbuf *bot_pb = (fi->step > 0) ? fi->next_pb : fi->cur_pb;
+    fi_draw_card_half(cr, w, h, bot_pb, 1, 1.0);
+
+    /* Static top half */
+    {
+        GdkPixbuf *top_pb = (fi->step > FLIP_STEPS/2) ? fi->next_pb : fi->cur_pb;
+        fi_draw_card_half(cr, w, h, top_pb, 0, 1.0);
+    }
+
+    /* Animated flap */
+    if (fi->step > 0) {
+        double progress = (double)fi->step / FLIP_STEPS;
+        double scale_y, alpha;
+        GdkPixbuf *flap_pb;
+
+        if (progress <= 0.5) {
+            double t = progress / 0.5;
+            scale_y  = 1.0 - t * 0.92;
+            alpha    = 1.0 - t * 0.6;
+            flap_pb  = fi->cur_pb;
+        } else {
+            double t = (progress - 0.5) / 0.5;
+            scale_y  = t * 0.92 + 0.08;
+            alpha    = t * 0.7 + 0.3;
+            flap_pb  = fi->next_pb;
+        }
+
+        cairo_save(cr);
+        cairo_rectangle(cr, 0, 0, w, h/2.0);
+        cairo_clip(cr);
+        cairo_translate(cr, 0, h/2.0);
+        cairo_scale(cr, 1.0, scale_y);
+        cairo_translate(cr, 0, -h/2.0);
+        fi_draw_card_half(cr, w, h, flap_pb, 0, alpha);
+        fi_draw_crease(cr, w, h);
+        cairo_restore(cr);
+    }
+
+    fi_draw_crease(cr, w, h);
+    return FALSE;
+}
+
+/* Timer tick */
+static gboolean flip_icon_tick(gpointer user_data)
+{
+    FlipIcon *fi = (FlipIcon *)user_data;
+    fi->step++;
+    gtk_widget_queue_draw(fi->area);
+
+    if (fi->step >= FLIP_STEPS) {
+        if (fi->cur_pb) g_object_unref(fi->cur_pb);
+        fi->cur_pb   = fi->next_pb;
+        fi->next_pb  = NULL;
+        fi->step     = 0;
+        fi->timer_id = 0;
+        return G_SOURCE_REMOVE;
+    }
+    return G_SOURCE_CONTINUE;
+}
+
+/* Set a new pixbuf — triggers flip animation */
+static void flip_icon_set(FlipIcon *fi, GdkPixbuf *pb)
+{
+    /* If already animating, commit current and restart */
+    if (fi->step > 0) {
+        if (fi->cur_pb) g_object_unref(fi->cur_pb);
+        fi->cur_pb = fi->next_pb;
+        fi->next_pb = NULL;
+        if (fi->timer_id) {
+            g_source_remove(fi->timer_id);
+            fi->timer_id = 0;
+        }
+        fi->step = 0;
+    }
+    /* Reference the new pixbuf as next */
+    if (fi->next_pb) g_object_unref(fi->next_pb);
+    fi->next_pb  = pb ? g_object_ref(pb) : NULL;
+    fi->step     = 1;
+    fi->timer_id = g_timeout_add(FLIP_MS, flip_icon_tick, fi);
+    gtk_widget_queue_draw(fi->area);
+}
+
+/* Constructor */
+static FlipIcon *flip_icon_new(void)
+{
+    FlipIcon *fi = g_new0(FlipIcon, 1);
+    fi->area = gtk_drawing_area_new();
+    gtk_widget_set_size_request(fi->area, ICON_W, ICON_H);
+    g_signal_connect(fi->area, "draw",
+                     G_CALLBACK(flip_icon_draw), fi);
+    return fi;
+}
+
+/* Up to 5 forecast flip-icon slots (one per day) */
+#define MAX_FORECAST 5
+static FlipIcon *forecast_icons[MAX_FORECAST];
+
 /* ---------------- DRAW ---------------- */
 
 static gboolean draw_background(
@@ -662,10 +1128,10 @@ static gboolean draw_background(
 
     cairo_set_source_rgba(
         cr,
-        dark_mode ? 0.08 : 1.0,
-        dark_mode ? 0.08 : 1.0,
-        dark_mode ? 0.08 : 1.0,
-        dark_mode ? 0.35 : 0.55
+        dark_mode ? 0.08 : 0.97,
+        dark_mode ? 0.08 : 0.97,
+        dark_mode ? 0.08 : 0.97,
+        dark_mode ? 0.82 : 0.90
     );
 
     double radius = 18.0;
@@ -735,19 +1201,14 @@ static gboolean update_clock(
     struct tm *tm_info =
         localtime(&now);
 
-    char buffer[64];
 
-    strftime(
-        buffer,
-        sizeof(buffer),
-        "%H:%M",
-        tm_info
-    );
+    char buffer[6];
+    strftime(buffer, sizeof(buffer), "%H%M", tm_info);
 
-    gtk_label_set_text(
-        GTK_LABEL(clock_label),
-        buffer
-    );
+    flip_digit_set(fd_h1, buffer[0]);
+    flip_digit_set(fd_h2, buffer[1]);
+    flip_digit_set(fd_m1, buffer[2]);
+    flip_digit_set(fd_m2, buffer[3]);
 
     return TRUE;
 }
@@ -917,7 +1378,7 @@ static void update_weather(void)
     GdkPixbuf *pb =
         load_scaled_pixbuf(
             icon_file,
-            48
+            75
         );
 
     if (pb)
@@ -981,7 +1442,6 @@ static void update_weather(void)
         &codes
     );
 
-    clear_box(icon_row);
     clear_box(day_row);
     clear_box(night_row);
     clear_box(weekday_row);
@@ -1048,38 +1508,18 @@ static void update_weather(void)
                 fcode
             );
 
-        GtkWidget *icon_img;
-
         GdkPixbuf *fpb =
             load_scaled_pixbuf(
                 ficon_file,
-                28
+                40
             );
 
+        if (forecast_icons[i]) {
+            flip_icon_set(forecast_icons[i], fpb);
+        }
+
         if (fpb)
-        {
-            icon_img =
-                gtk_image_new_from_pixbuf(
-                    fpb
-                );
-
             g_object_unref(fpb);
-        }
-        else
-        {
-            icon_img =
-                gtk_image_new_from_file(
-                    ficon_file
-                );
-        }
-
-        gtk_box_pack_start(
-            GTK_BOX(icon_row),
-            icon_img,
-            TRUE,
-            TRUE,
-            4
-        );
 
         char maxbuf[32];
 
@@ -1478,8 +1918,8 @@ int main(
 
     gtk_window_set_default_size(
         GTK_WINDOW(window),
-        250,
-        220
+        300,
+        300
     );
 
     gtk_window_set_decorated(
@@ -1636,12 +2076,12 @@ int main(
     GtkWidget *main_box =
         gtk_box_new(
             GTK_ORIENTATION_VERTICAL,
-            4
+            3
         );
 
     gtk_container_set_border_width(
         GTK_CONTAINER(main_box),
-        10
+        6
     );
 
     gtk_container_add(
@@ -1649,21 +2089,47 @@ int main(
         main_box
     );
 
-    clock_label =
-        gtk_label_new("");
+GtkWidget *clock_box =
+    gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
 
-    gtk_widget_set_name(
-        clock_label,
-        "clock_label"
-    );
+/* Centre the clock row horizontally */
+gtk_widget_set_halign(clock_box, GTK_ALIGN_CENTER);
 
-    gtk_box_pack_start(
-        GTK_BOX(main_box),
-        clock_label,
-        FALSE,
-        FALSE,
-        1
-    );
+/* Get current time for initial digits */
+{
+    time_t now = time(NULL);
+    struct tm *tm_info = localtime(&now);
+    char buf[6];
+    strftime(buf, sizeof(buf), "%H%M", tm_info);
+    fd_h1 = flip_digit_new(buf[0]);
+    fd_h2 = flip_digit_new(buf[1]);
+    fd_m1 = flip_digit_new(buf[2]);
+    fd_m2 = flip_digit_new(buf[3]);
+}
+
+colon = gtk_drawing_area_new();
+gtk_widget_set_size_request(colon, 16, CARD_H);
+g_signal_connect(colon, "draw", G_CALLBACK(colon_draw), NULL);
+
+/* Compatibility: keep h1/h2/m1/m2 pointing somewhere harmless */
+h1 = fd_h1->area;
+h2 = fd_h2->area;
+m1 = fd_m1->area;
+m2 = fd_m2->area;
+
+gtk_box_pack_start(GTK_BOX(clock_box), fd_h1->area, FALSE, FALSE, 0);
+gtk_box_pack_start(GTK_BOX(clock_box), fd_h2->area, FALSE, FALSE, 0);
+gtk_box_pack_start(GTK_BOX(clock_box), colon,       FALSE, FALSE, 0);
+gtk_box_pack_start(GTK_BOX(clock_box), fd_m1->area, FALSE, FALSE, 0);
+gtk_box_pack_start(GTK_BOX(clock_box), fd_m2->area, FALSE, FALSE, 0);
+
+gtk_box_pack_start(
+    GTK_BOX(main_box),
+    clock_box,
+    FALSE,
+    FALSE,
+    2
+);
 
     weather_icon_image =
         gtk_image_new();
@@ -1726,6 +2192,18 @@ int main(
             GTK_ORIENTATION_HORIZONTAL,
             2
         );
+
+    /* Pre-allocate one FlipIcon per forecast slot */
+    for (int i = 0; i < MAX_FORECAST; i++) {
+        forecast_icons[i] = flip_icon_new();
+        gtk_box_pack_start(
+            GTK_BOX(icon_row),
+            forecast_icons[i]->area,
+            TRUE,
+            TRUE,
+            2
+        );
+    }
 
     gtk_box_pack_start(
         GTK_BOX(main_box),
