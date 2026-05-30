@@ -934,24 +934,34 @@ static void fi_draw_card_half(cairo_t *cr, int w, int h,
     cairo_pattern_t *bg;
     if (half == 0) {
         bg = cairo_pattern_create_linear(0, 0, 0, h);
-        cairo_pattern_add_color_stop_rgb(bg, 0.0,
-            dark_mode ? 0.16 : 1.00,
-            dark_mode ? 0.16 : 1.00,
-            dark_mode ? 0.16 : 1.00);
-        cairo_pattern_add_color_stop_rgb(bg, 1.0,
-            dark_mode ? 0.08 : 0.90,
-            dark_mode ? 0.08 : 0.90,
-            dark_mode ? 0.08 : 0.90);
+       double card_alpha = 0.65;   /* 75% opacity */
+
+cairo_pattern_add_color_stop_rgba(bg, 0.0,
+    dark_mode ? 0.16 : 1.00,
+    dark_mode ? 0.16 : 1.00,
+    dark_mode ? 0.16 : 1.00,
+    card_alpha);
+
+cairo_pattern_add_color_stop_rgba(bg, 1.0,
+    dark_mode ? 0.08 : 0.60,
+    dark_mode ? 0.08 : 0.60,
+    dark_mode ? 0.08 : 0.60,
+    card_alpha);
     } else {
         bg = cairo_pattern_create_linear(0, 0, 0, h);
-        cairo_pattern_add_color_stop_rgb(bg, 0.0,
-            dark_mode ? 0.06 : 0.88,
-            dark_mode ? 0.06 : 0.88,
-            dark_mode ? 0.06 : 0.88);
-        cairo_pattern_add_color_stop_rgb(bg, 1.0,
-            dark_mode ? 0.13 : 0.96,
-            dark_mode ? 0.13 : 0.96,
-            dark_mode ? 0.13 : 0.96);
+       double card_alpha = 0.65;   /* 75% opacity */
+
+cairo_pattern_add_color_stop_rgba(bg, 0.0,
+    dark_mode ? 0.16 : 1.00,
+    dark_mode ? 0.16 : 1.00,
+    dark_mode ? 0.16 : 1.00,
+    card_alpha);
+
+cairo_pattern_add_color_stop_rgba(bg, 1.0,
+    dark_mode ? 0.08 : 0.60,
+    dark_mode ? 0.08 : 0.60,
+    dark_mode ? 0.08 : 0.60,
+    card_alpha);
     }
 
     cairo_save(cr);
@@ -1126,13 +1136,13 @@ static gboolean draw_background(
         &allocation
     );
 
-    cairo_set_source_rgba(
-        cr,
-        dark_mode ? 0.08 : 0.97,
-        dark_mode ? 0.08 : 0.97,
-        dark_mode ? 0.08 : 0.97,
-        dark_mode ? 0.82 : 0.90
-    );
+   cairo_set_source_rgba(
+    cr,
+    dark_mode ? 0.08 : 1.0,
+    dark_mode ? 0.08 : 1.0,
+    dark_mode ? 0.08 : 1.0,
+    dark_mode ? 0.55 : 0.55
+);
 
     double radius = 18.0;
 
@@ -1378,7 +1388,7 @@ static void update_weather(void)
     GdkPixbuf *pb =
         load_scaled_pixbuf(
             icon_file,
-            75
+            128
         );
 
     if (pb)
@@ -2123,34 +2133,102 @@ gtk_box_pack_start(GTK_BOX(clock_box), colon,       FALSE, FALSE, 0);
 gtk_box_pack_start(GTK_BOX(clock_box), fd_m1->area, FALSE, FALSE, 0);
 gtk_box_pack_start(GTK_BOX(clock_box), fd_m2->area, FALSE, FALSE, 0);
 
-gtk_box_pack_start(
-    GTK_BOX(main_box),
+/* -------------------------------------------------
+ * Clock + overlapping weather icon
+ * ------------------------------------------------- */
+
+GtkWidget *overlay =
+    gtk_overlay_new();
+
+gtk_widget_set_size_request(overlay, -1, 137);
+
+gtk_widget_set_margin_bottom(
+    overlay,
+ 0 /* adjust */
+    ); 
+
+gtk_widget_set_halign(clock_box, GTK_ALIGN_CENTER);
+gtk_widget_set_valign(clock_box, GTK_ALIGN_CENTER);
+gtk_widget_set_vexpand(clock_box, FALSE);
+gtk_widget_set_hexpand(clock_box, FALSE);
+
+/* Clock is the base layer */
+gtk_container_add(
+    GTK_CONTAINER(overlay),
+    clock_box
+);
+gtk_widget_set_valign(
     clock_box,
-    FALSE,
-    FALSE,
-    2
+    GTK_ALIGN_START
 );
 
-    weather_icon_image =
-        gtk_image_new();
+gtk_widget_set_margin_top(
+    clock_box,
+    0
+);
+weather_icon_image =
+    gtk_image_new();
 
-    gtk_box_pack_start(
-        GTK_BOX(main_box),
-        weather_icon_image,
-        FALSE,
-        FALSE,
-        1
+/* Weather icon is drawn on top of the clock */
+gtk_overlay_add_overlay(
+    GTK_OVERLAY(overlay),
+    weather_icon_image
+);
+
+/* Center horizontally */
+gtk_widget_set_halign(
+    weather_icon_image,
+    GTK_ALIGN_CENTER
+);
+
+/* Anchor to top of overlay */
+gtk_widget_set_valign(
+    weather_icon_image,
+    GTK_ALIGN_START
+);
+
+/*
+ * Vertical overlap amount.
+ *
+ * Increase:
+ *   10 -> small overlap
+ *   20 -> medium overlap
+ *   30 -> strong overlap
+ */
+gtk_widget_set_margin_top(
+    weather_icon_image,
+   30
+);
+
+/* Put overlay into main layout */
+gtk_box_pack_start(
+    GTK_BOX(main_box),
+    overlay,
+    FALSE,
+    FALSE,
+    0
+);
+
+current_label =
+    gtk_label_new(
+        "Loading..."
     );
 
-    current_label =
-        gtk_label_new(
-            "Loading..."
-        );
+gtk_widget_set_name(
+    current_label,
+    "current_label"
+);
 
-    gtk_widget_set_name(
-        current_label,
-        "current_label"
-    );
+/* Adjust temperature text position */
+gtk_widget_set_halign(
+    current_label,
+    GTK_ALIGN_CENTER
+);
+
+gtk_widget_set_margin_top(
+    current_label,
+    0    /* increase = lower, decrease = higher */
+);
 
     gtk_box_pack_start(
         GTK_BOX(main_box),
